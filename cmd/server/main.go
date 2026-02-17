@@ -1,172 +1,214 @@
 package main
 
 import (
-    "encoding/json"
-    "flag"
-    "fmt"
-    "log"
-    "net"
-    "net/http"
-    "os"
-    "os/signal"
-    "strings"
-    "syscall"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 
-    "github.com/consus/consus/api"
-    "github.com/consus/consus/internal/cluster"
-    "github.com/consus/consus/internal/raft"
-    "github.com/consus/consus/internal/storage"
-    "github.com/consus/consus/internal/transport"
-    "github.com/consus/consus/proto"
-    "google.golang.org/grpc"
+	"github.com/krishnagoyal099/Consus/api"
+	"github.com/krishnagoyal099/Consus/internal/chaos"
+	"github.com/krishnagoyal099/Consus/internal/cluster"
+	"github.com/krishnagoyal099/Consus/internal/raft"
+	"github.com/krishnagoyal099/Consus/internal/shard"
+	"github.com/krishnagoyal099/Consus/internal/storage"
+	"github.com/krishnagoyal099/Consus/internal/transport"
+	"github.com/krishnagoyal099/Consus/proto"
+	"google.golang.org/grpc"
 )
 
 func main() {
-    // 1. Parse Flags
-    id := flag.String("id", "node1", "Unique node ID")
-    port := flag.Int("port", 50051, "gRPC Port")
-    httpPort := flag.Int("http-port", 8080, "HTTP Dashboard Port")
-    clusterStr := flag.String("cluster", "node1=localhost:50051,node2=localhost:50052,node3=localhost:50053", "Cluster config: id=addr,id=addr")
-    dataDir := flag.String("data", "./data/"+*id, "Data directory")
-    flag.Parse()
+	// 1. Parse Flags
+	id := flag.String("id", "node1", "Unique node ID")
+	port := flag.Int("port", 50051, "gRPC Port")
+	httpPort := flag.Int("http-port", 8080, "HTTP Dashboard Port")
+	clusterStr := flag.String("cluster", "node1=localhost:50051,node2=localhost:50052,node3=localhost:50053", "Cluster config: id=addr,id=addr")
+	dataDir := flag.String("data", "./data/node1", "Data directory")
+	flag.Parse()
 
-    log.Printf("Starting Consus Node [%s]...", *id)
+	log.Printf("╔══════════════════════════════════════╗")
+	log.Printf("║    CONSUS — Distributed KV Store     ║")
+	log.Printf("║  Multi-Raft · Parallel · Tiered      ║")
+	log.Printf("╚══════════════════════════════════════╝")
+	log.Printf("Starting Node [%s]...", *id)
 
-    // 2. Initialize Storage
-    store, err := storage.Open(*dataDir)
-    if err != nil {
-        log.Fatalf("Failed to open storage: %v", err)
-    }
+	// 2. Initialize Storage (Bitcask warm tier + TieredStore wrapper)
+	bitcask, err := storage.Open(*dataDir)
+	if err != nil {
+		log.Fatalf("Failed to open storage: %v", err)
+	}
 
-    // 3. Initialize Raft
-    applyCh := make(chan string, 100)
-    raftNode := raft.NewNode(*id, applyCh)
-    
-    // Applier Loop: Apply committed entries to the Storage Engine
-    go func() {
-        for cmd := range applyCh {
-            var command map[string]string
-            if err := json.Unmarshal([]byte(cmd), &command); err != nil {
-                log.Printf("Error unmarshaling command: %v", err)
-                continue
-            }
+	tieredConfig := storage.DefaultTieredConfig(*dataDir)
+	tieredStore := storage.NewTieredStore(bitcask, tieredConfig)
 
-            op := command["op"]
-            key := command["key"]
-            val := command["value"]
+	// 3. Initialize Raft
+	applyCh := make(chan string, 100)
+	raftNode := raft.NewNode(*id, applyCh)
 
-            switch op {
-            case "PUT":
-                if err := store.Put(key, []byte(val)); err != nil {
-                    log.Printf("Error applying PUT: %v", err)
-                }
-            case "DELETE":
-                if err := store.Delete(key); err != nil {
-                    log.Printf("Error applying DELETE: %v", err)
-                }
-            }
-        }
-    }()
+	// 4. Initialize Parallel Raft Engine
+	parallelEngine := raft.NewParallelRaftEngine(*id, raftNode)
 
-    // 4. Initialize Cluster & Peers
-    ring := cluster.NewRing(50) // 50 virtual nodes per physical node
-    
-    // Parse cluster config
-    peers := strings.Split(*clusterStr, ",")
-    peerMap := make(map[string]raft.Peer)
+	// 5. Initialize Shard Manager
+	shardConfig := shard.DefaultManagerConfig()
+	shardMgr := shard.NewManager(shardConfig)
 
-    for _, p := range peers {
-        parts := strings.Split(p, "=")
-        if len(parts) != 2 {
-            continue
-        }
-        peerID := parts[0]
-        peerAddr := parts[1]
+	// Add initial shard covering the full key space
+	shardMgr.AddShard(&shard.ShardMetadata{
+		StartKey: "",
+		EndKey:   "",
+		Leader:   *id,
+		Replicas: []string{*id},
+	})
 
-        ring.AddNode(peerID)
+	// Applier Loop: Apply committed entries to the TieredStore
+	go func() {
+		for cmd := range applyCh {
+			applyCommand(cmd, tieredStore)
+		}
+	}()
 
-        // Add peer to Raft if it's not self
-        if peerID != *id {
-            pNode, err := cluster.NewNode(peerID, peerAddr)
-            if err != nil {
-                log.Printf("Warning: Could not connect to peer %s: %v", peerID, err)
-            }
-            peerMap[peerID] = pNode
-            raftNode.AddPeer(peerID, pNode)
-        }
-    }
+	// 6. Initialize Cluster & Peers
+	ring := cluster.NewRing(50) // 50 virtual nodes per physical node
+	peerAddrs := make(map[string]string)
 
-    // Start Raft background processes
-    go raftNode.Run()
+	// Parse cluster config
+	peers := strings.Split(*clusterStr, ",")
 
-    // 5. Initialize gRPC Server
-    // Create the transport server which links Store and Raft
-    grpcSrv := transport.NewServer(store, raftNode)
-    
-    // Create a wrapper for the Ring to handle sharding/forwarding logic if needed
-    // For simplicity in this phase, we pass the ring to the server logic internally or assume
-    // clients call the correct node. Let's wrap the server logic:
-    wrappedSrv := &ShardingServer{
-        Server: grpcSrv,
-        Ring:   ring,
-        ID:     *id,
-    }
+	for _, p := range peers {
+		parts := strings.Split(p, "=")
+		if len(parts) != 2 {
+			continue
+		}
+		peerID := parts[0]
+		peerAddr := parts[1]
 
-    listener, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
-    if err != nil {
-        log.Fatalf("Failed to listen: %v", err)
-    }
+		ring.AddNode(peerID)
+		shardMgr.RegisterNode(peerID)
+		peerAddrs[peerID] = peerAddr
 
-    grpcServer := grpc.NewServer()
-    proto.RegisterKVServer(grpcServer, wrappedSrv)
-    proto.RegisterRaftServer(grpcServer, wrappedSrv) // wrappedSrv delegates Raft calls
+		if peerID != *id {
+			pNode, err := cluster.NewNode(peerID, peerAddr)
+			if err != nil {
+				log.Printf("Warning: Could not connect to peer %s: %v", peerID, err)
+			}
+			raftNode.AddPeer(peerID, pNode)
+		}
+	}
 
-    go func() {
-        log.Printf("gRPC Server listening on port %d", *port)
-        if err := grpcServer.Serve(listener); err != nil {
-            log.Fatalf("Failed to serve gRPC: %v", err)
-        }
-    }()
+	// Start Raft background processes
+	go raftNode.Run()
 
-    // 6. Initialize HTTP Dashboard Server
-    // We pass the ring and raftNode to the dashboard for visualization
-    httpHandler := api.NewDashboardHandler(ring, raftNode, store, *id)
-    go func() {
-        log.Printf("HTTP Dashboard listening on port %d", *httpPort)
-        if err := http.ListenAndServe(fmt.Sprintf(":%d", *httpPort), httpHandler); err != nil {
-            log.Printf("HTTP Server error: %v", err)
-        }
-    }()
+	// 7. Initialize gRPC Server
+	grpcSrv := transport.NewServer(bitcask, raftNode)
 
-    // 7. Graceful Shutdown
-    sigCh := make(chan os.Signal, 1)
-    signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-    <-sigCh
+	wrappedSrv := &ShardingServer{
+		Server: grpcSrv,
+		Ring:   ring,
+		ID:     *id,
+	}
 
-    log.Println("Shutting down...")
-    grpcServer.Stop()
-    raftNode.Stop()
-    store.Close()
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	if err != nil {
+		log.Fatalf("Failed to listen: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	proto.RegisterKVServer(grpcServer, wrappedSrv)
+	proto.RegisterRaftServer(grpcServer, wrappedSrv)
+
+	go func() {
+		log.Printf("gRPC Server listening on port %d", *port)
+		if err := grpcServer.Serve(listener); err != nil {
+			log.Fatalf("Failed to serve gRPC: %v", err)
+		}
+	}()
+
+	// 8. Initialize Chaos Engine (built-in — not an external tool)
+	chaosEngine := chaos.NewEngine(nil) // No live cluster interface for now
+
+	// 9. Initialize HTTP Dashboard with all subsystems
+	httpHandler := api.NewDashboardHandler(
+		ring, raftNode, tieredStore, *id,
+		api.WithShardManager(shardMgr),
+		api.WithParallelEngine(parallelEngine),
+		api.WithChaosEngine(chaosEngine),
+		api.WithPeerAddresses(peerAddrs),
+	)
+
+	go func() {
+		log.Printf("HTTP Dashboard listening on http://localhost:%d", *httpPort)
+		if err := http.ListenAndServe(fmt.Sprintf(":%d", *httpPort), httpHandler); err != nil {
+			log.Printf("HTTP Server error: %v", err)
+		}
+	}()
+
+	// 10. Shard Action Consumer (handles split/merge/transfer decisions)
+	go func() {
+		for action := range shardMgr.ActionCh() {
+			log.Printf("[MAIN] Shard action: %s shard=%d reason=%q", action.Type, action.ShardID, action.Reason)
+		}
+	}()
+
+	log.Printf("✅ All systems initialized. Node %s is ready.", *id)
+
+	// 11. Graceful Shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	log.Println("Shutting down...")
+	grpcServer.Stop()
+	parallelEngine.Stop()
+	shardMgr.Stop()
+	raftNode.Stop()
+	tieredStore.Close()
+}
+
+// applyCommand processes a committed Raft log entry against the storage engine.
+func applyCommand(cmd string, store *storage.TieredStore) {
+	// Try single command first
+	var command map[string]string
+	if err := json.Unmarshal([]byte(cmd), &command); err == nil {
+		executeOp(command, store)
+		return
+	}
+
+	// Try batch command
+	var batch struct {
+		Batch []map[string]string `json:"batch"`
+	}
+	if err := json.Unmarshal([]byte(cmd), &batch); err == nil && len(batch.Batch) > 0 {
+		for _, op := range batch.Batch {
+			executeOp(op, store)
+		}
+		return
+	}
+
+	log.Printf("[APPLY] Error: could not parse command: %s", cmd)
+}
+
+func executeOp(command map[string]string, store *storage.TieredStore) {
+	switch command["op"] {
+	case "PUT":
+		if err := store.Put(command["key"], []byte(command["value"])); err != nil {
+			log.Printf("[APPLY] PUT error: %v", err)
+		}
+	case "DELETE":
+		if err := store.Delete(command["key"]); err != nil {
+			log.Printf("[APPLY] DELETE error: %v", err)
+		}
+	}
 }
 
 // ShardingServer wraps the transport server to enforce sharding logic.
 type ShardingServer struct {
-    *transport.Server
-    Ring *cluster.Ring
-    ID   string
+	*transport.Server
+	Ring *cluster.Ring
+	ID   string
 }
-
-// In a real production system, Put would check the ring here.
-// If key belongs to another node, forward or return error.
-// For this project, we rely on the client or coordinator to talk to the correct node,
-// or the ring map to direct traffic.
-// We override the interface just to show the logic location.
-/*
-func (s *ShardingServer) Put(ctx context.Context, req *proto.PutRequest) (*proto.PutResponse, error) {
-    owner := s.Ring.GetNode(req.Key)
-    if owner != s.ID {
-        return &proto.PutResponse{Success: false, Error: "wrong node: belongs to " + owner}, nil
-    }
-    return s.Server.Put(ctx, req)
-}
-*/

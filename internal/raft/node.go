@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/consus/consus/proto"
+	"github.com/krishnagoyal099/Consus/proto"
 )
 
 // State Type

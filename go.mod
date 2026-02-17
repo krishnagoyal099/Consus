@@ -1,4 +1,4 @@
-module github.com/consus/consus
+module github.com/krishnagoyal099/Consus
 
 go 1.25.3
 

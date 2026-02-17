@@ -1,0 +1,109 @@
+# Consus Kubernetes Deployment
+# Creates a 3-node StatefulSet with headless service for peer discovery
+# and a LoadBalancer service for client access.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: consus-headless
+  labels:
+    app: consus
+spec:
+  clusterIP: None
+  selector:
+    app: consus
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+    - name: http
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: consus
+spec:
+  serviceName: consus-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: consus
+  template:
+    metadata:
+      labels:
+        app: consus
+    spec:
+      containers:
+        - name: consus
+          image: consus:latest
+          command:
+            - consus-server
+          args:
+            - "--id=$(POD_NAME)"
+            - "--port=50051"
+            - "--http-port=8080"
+            - "--data=/data"
+            - "--cluster=consus-0=consus-0.consus-headless:50051,consus-1=consus-1.consus-headless:50051,consus-2=consus-2.consus-headless:50051"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - containerPort: 50051
+              name: grpc
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          readinessProbe:
+            httpGet:
+              path: /api/state
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/state
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: consus-client
+  labels:
+    app: consus
+spec:
+  type: LoadBalancer
+  selector:
+    app: consus
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+    - name: http
+      port: 8080
+      targetPort: 8080

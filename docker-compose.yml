@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  consus-1:
+    build: .
+    container_name: consus-node-1
+    command: >
+      consus-server
+      --id=node1
+      --port=50051
+      --http-port=8080
+      --data=/data
+      --cluster=node1=consus-1:50051,node2=consus-2:50051,node3=consus-3:50051
+    ports:
+      - "50051:50051"
+      - "8081:8080"
+    volumes:
+      - consus-data-1:/data
+    networks:
+      - consus-net
+    restart: unless-stopped
+
+  consus-2:
+    build: .
+    container_name: consus-node-2
+    command: >
+      consus-server
+      --id=node2
+      --port=50051
+      --http-port=8080
+      --data=/data
+      --cluster=node1=consus-1:50051,node2=consus-2:50051,node3=consus-3:50051
+    ports:
+      - "50052:50051"
+      - "8082:8080"
+    volumes:
+      - consus-data-2:/data
+    networks:
+      - consus-net
+    restart: unless-stopped
+
+  consus-3:
+    build: .
+    container_name: consus-node-3
+    command: >
+      consus-server
+      --id=node3
+      --port=50051
+      --http-port=8080
+      --data=/data
+      --cluster=node1=consus-1:50051,node2=consus-2:50051,node3=consus-3:50051
+    ports:
+      - "50053:50051"
+      - "8083:8080"
+    volumes:
+      - consus-data-3:/data
+    networks:
+      - consus-net
+    restart: unless-stopped
+
+volumes:
+  consus-data-1:
+  consus-data-2:
+  consus-data-3:
+
+networks:
+  consus-net:
+    driver: bridge

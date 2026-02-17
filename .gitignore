@@ -13,3 +13,20 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# Docker
+.docker/
+
+# Misc
+*.log
+tmp/

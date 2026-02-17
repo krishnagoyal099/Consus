@@ -1,11 +1,11 @@
 package raft
 
 import (
-    "context"
-    "log"
-    "time"
+	"context"
+	"log"
+	"time"
 
-    "github.com/consus/consus/proto"
+	"github.com/krishnagoyal099/Consus/proto"
 )
 
 // runLeader manages the heartbeat and log replication.

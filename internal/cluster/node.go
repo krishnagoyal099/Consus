@@ -1,12 +1,12 @@
 package cluster
 
 import (
-    "context"
-    "time"
+	"context"
+	"time"
 
-    "github.com/consus/consus/proto"
-    "google.golang.org/grpc"
-    "google.golang.org/grpc/credentials/insecure"
+	"github.com/krishnagoyal099/Consus/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Node represents a remote node in the cluster.

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package consus;
 
-option go_package = "github.com/consus/consus/proto";
+option go_package = "github.com/krishnagoyal099/Consus/proto";
 
 // --- Key-Value Service (External API) ---
 

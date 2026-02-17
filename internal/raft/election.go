@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/consus/consus/proto"
+	"github.com/krishnagoyal099/Consus/proto"
 )
 
 var ErrNotLeader = errors.New("not the leader")

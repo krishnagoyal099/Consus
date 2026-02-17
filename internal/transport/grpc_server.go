@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/consus/consus/internal/storage"
-	"github.com/consus/consus/proto"
+	"github.com/krishnagoyal099/Consus/internal/storage"
+	"github.com/krishnagoyal099/Consus/proto"
 )
 
 // RaftNode is the interface required by the Transport layer to interact with the Consensus module.
